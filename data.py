@@ -29,15 +29,17 @@ class SyntheticDataset(Dataset):
 
 
 def build_transform(cfg):
+    mean = CIFAR_MEAN
+    std = CIFAR_STD
+
     if cfg.aug:
         return T.Compose(
             [
                 T.Resize(int(cfg.img_size * 1.125)),
                 T.RandomCrop(cfg.img_size),
                 T.RandomHorizontalFlip(),
-                T.ColorJitter(0.4, 0.4, 0.4, 0.1),
                 T.ToTensor(),
-                T.Normalize(CIFAR_MEAN, CIFAR_STD),
+                T.Normalize(mean, std),
             ]
         )
 
@@ -45,7 +47,7 @@ def build_transform(cfg):
         [
             T.Resize(cfg.img_size),
             T.ToTensor(),
-            T.Normalize(CIFAR_MEAN, CIFAR_STD),
+            T.Normalize(mean, std),
         ]
     )
 
@@ -70,20 +72,12 @@ def build_dataset(cfg, rank: int, world_size: int, ddp: bool):
 
     transform = build_transform(cfg)
 
+    # Use ImageFolder to read any folder-based dataset (e.g. blood-cells).
     if ddp:
-        if rank == 0:
-            torchvision.datasets.CIFAR10(
-                root=cfg.data_path,
-                train=True,
-                download=True,
-            )
-
         dist.barrier()
 
-        dataset = torchvision.datasets.CIFAR10(
+        dataset = torchvision.datasets.ImageFolder(
             root=cfg.data_path,
-            train=True,
-            download=False,
             transform=transform,
         )
 
@@ -96,10 +90,8 @@ def build_dataset(cfg, rank: int, world_size: int, ddp: bool):
         )
 
     else:
-        dataset = torchvision.datasets.CIFAR10(
+        dataset = torchvision.datasets.ImageFolder(
             root=cfg.data_path,
-            train=True,
-            download=True,
             transform=transform,
         )
 
@@ -129,18 +121,19 @@ def build_loader(dataset, sampler, cfg):
 
 
 def build_tsne_loader(cfg):
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+
     transform = T.Compose(
         [
             T.Resize(cfg.img_size),
             T.ToTensor(),
-            T.Normalize(CIFAR_MEAN, CIFAR_STD),
+            T.Normalize(mean, std),
         ]
     )
 
-    dataset = torchvision.datasets.CIFAR10(
+    dataset = torchvision.datasets.ImageFolder(
         root=cfg.data_path,
-        train=False,
-        download=True,
         transform=transform,
     )
 

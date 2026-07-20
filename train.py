@@ -1,52 +1,41 @@
 import datetime
+import math
 import os
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
 
-try:
-    from torch.distributed.elastic.multiprocessing.errors import record
-except Exception:
-    def record(fn=None, error_handler=None):
-        if fn is None:
-            return lambda f: f
-        return fn
-
-try:
-    import torch._dynamo
-    DYNAMO_AVAILABLE = True
-except Exception:
-    DYNAMO_AVAILABLE = False
+import torchvision
+import torchvision.transforms as T
 
 from config import parse_config
-from data import build_dataset, build_loader, build_tsne_loader
+from data import build_dataset, build_loader
 from model import NanoJEPA, jepa_loss
 
 
+# ---------------------------------------------------------------------
+# Distributed setup
+# ---------------------------------------------------------------------
 def setup_dist():
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-
-    # Often helpful on Kaggle T4 instances.
+    # Kaggle T4 boxes often do better with P2P/IB disabled.
+    # If you are on a workstation with NVLink, you can remove these.
     os.environ.setdefault("NCCL_P2P_DISABLE", "1")
     os.environ.setdefault("NCCL_IB_DISABLE", "1")
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-
         dist.init_process_group(
             backend="nccl",
             timeout=datetime.timedelta(minutes=30),
         )
-
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
         return rank, world_size, local_rank, True
 
     torch.cuda.set_device(0)
@@ -64,6 +53,9 @@ def set_seed(seed: int, rank: int):
     torch.cuda.manual_seed_all(seed)
 
 
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     if isinstance(model, DDP):
         model = model.module
@@ -76,7 +68,7 @@ def adjust_lr(optimizer, step: int, total_steps: int, warmup_steps: int, base_lr
         lr = base_lr * (step + 1) / max(1, warmup_steps)
     else:
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        lr = base_lr * 0.5 * (1.0 + torch.cos(torch.tensor(torch.pi * progress)).item())
+        lr = base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     for g in optimizer.param_groups:
         g["lr"] = lr
@@ -89,7 +81,7 @@ def cosine_schedule(step: int, total_steps: int, base: float, end: float) -> flo
         return base
 
     progress = min(step / max(1, total_steps - 1), 1.0)
-    return base + (end - base) * 0.5 * (1.0 - torch.cos(torch.tensor(torch.pi * progress)).item())
+    return base + (end - base) * 0.5 * (1.0 - math.cos(math.pi * progress))
 
 
 def save_checkpoint(path: Path, model, optimizer, scaler, epoch: int, cfg):
@@ -98,12 +90,15 @@ def save_checkpoint(path: Path, model, optimizer, scaler, epoch: int, cfg):
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
         "epoch": epoch,
-        "config": asdict(cfg),
+        "args": vars(cfg) if hasattr(cfg, "__dict__") else {},
     }
 
     torch.save(obj, path)
 
 
+# ---------------------------------------------------------------------
+# Optional t-SNE export
+# ---------------------------------------------------------------------
 @torch.no_grad()
 def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
     try:
@@ -115,7 +110,30 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
         print("scikit-learn and matplotlib are required for --tsne. Skipping t-SNE.")
         return
 
-    loader = build_tsne_loader(cfg)
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+
+    transform = T.Compose(
+        [
+            T.Resize(cfg.img_size),
+            T.ToTensor(),
+            T.Normalize(mean, std),
+        ]
+    )
+
+    dataset = torchvision.datasets.ImageFolder(
+        root=cfg.data_path,
+        transform=transform,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=256,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+        drop_last=False,
+    )
 
     feats = []
     labels = []
@@ -126,7 +144,7 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
     for x, y in loader:
         x = x.to(device, non_blocking=True, memory_format=torch.channels_last)
 
-        with torch.cuda.amp.autocast(enabled=cfg.fp16):
+        with torch.cuda.amp.autocast(enabled=not cfg.disable_fp16):
             tokens = model_without_ddp.target_patch_embed(x).flatten(2).transpose(1, 2)
             tokens = tokens + model_without_ddp.target_pos_embed
             out = model_without_ddp.target_encoder(tokens)
@@ -136,7 +154,6 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
         labels.append(y)
 
         collected += feat.size(0)
-
         if collected >= cfg.tsne_samples:
             break
 
@@ -144,7 +161,6 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
     labels = torch.cat(labels, dim=0)[: cfg.tsne_samples]
 
     print(f"Running t-SNE on {feats.shape[0]} samples...")
-
     emb = TSNE(
         n_components=2,
         perplexity=30,
@@ -154,7 +170,6 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
     ).fit_transform(feats.numpy())
 
     plt.figure(figsize=(8, 6))
-
     scatter = plt.scatter(
         emb[:, 0],
         emb[:, 1],
@@ -163,17 +178,17 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
         s=8,
         alpha=0.85,
     )
-
     plt.colorbar(scatter)
     plt.title("Nano JEPA latent t-SNE")
-
     out_path = Path(cfg.output_dir) / "tsne_nano_jepa.png"
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
-
     print(f"Saved t-SNE figure to {out_path}")
 
 
+# ---------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------
 def train_one_epoch(
     model,
     model_without_ddp,
@@ -198,7 +213,6 @@ def train_one_epoch(
         loader.sampler.set_epoch(epoch)
 
     rank0 = rank == 0
-
     window_images = 0
     window_start = None
 
@@ -213,7 +227,7 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(enabled=cfg.fp16):
+        with torch.cuda.amp.autocast(enabled=not cfg.disable_fp16):
             pred, target = model(images)
             loss = jepa_loss(
                 pred,
@@ -225,9 +239,8 @@ def train_one_epoch(
         scaler.scale(loss).backward()
 
         if cfg.clip_grad > 0:
-            if cfg.fp16:
+            if not cfg.disable_fp16:
                 scaler.unscale_(optimizer)
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad)
 
         scaler.step(optimizer)
@@ -237,27 +250,22 @@ def train_one_epoch(
 
         batch_images = images.size(0) * world_size
 
-        # Skip first few warmup iterations for stable throughput measurement.
+        # Skip the first few warmup iterations for stable throughput measurement.
         if global_step >= 5:
             if window_start is None:
                 window_start = time.perf_counter()
-
             window_images += batch_images
 
-        if (
-            cfg.log_interval > 0
-            and rank0
-            and window_images > 0
-            and (step + 1) % cfg.log_interval == 0
-        ):
+        if rank0 and window_images > 0 and (step + 1) % cfg.log_interval == 0:
             torch.cuda.synchronize()
-
             elapsed = time.perf_counter() - window_start
             img_sec = window_images / max(elapsed, 1e-9)
 
+            # Calibrated MFU using your reported Phase-1 accounting.
             tflops = img_sec * cfg.flops_per_image / 1e12
             mfu = 100.0 * tflops / cfg.peak_tflops
 
+            # Theoretical transformer-style estimate for diagnostics only.
             theo_tflops = img_sec * 6.0 * total_params / 1e12
             theo_mfu = 100.0 * theo_tflops / cfg.peak_tflops
 
@@ -277,10 +285,8 @@ def train_one_epoch(
 
     if rank0 and window_images > 0 and window_start is not None:
         torch.cuda.synchronize()
-
         elapsed = time.perf_counter() - window_start
         img_sec = window_images / max(elapsed, 1e-9)
-
         tflops = img_sec * cfg.flops_per_image / 1e12
         mfu = 100.0 * tflops / cfg.peak_tflops
 
@@ -293,7 +299,9 @@ def train_one_epoch(
     return global_step
 
 
-@record
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 def main():
     cfg = parse_config()
 
@@ -310,9 +318,6 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision("high")
-
     if hasattr(torch.backends.cuda, "enable_flash_sdp"):
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -322,21 +327,20 @@ def main():
         Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 
     global_batch = cfg.batch_size * world_size
-
     base_lr = cfg.lr
     if cfg.scale_lr:
         base_lr = cfg.lr * float(global_batch) / float(cfg.lr_scale_base_batch)
 
     if rank == 0:
         print("=" * 80)
-        print("Nano JEPA Trainer")
+        print("Nano JEPA HPC Trainer")
         print("=" * 80)
         print(f"DDP enabled          : {ddp}")
         print(f"World size           : {world_size}")
         print(f"Per-GPU batch size   : {cfg.batch_size}")
         print(f"Global batch size    : {global_batch}")
         print(f"Base LR              : {base_lr}")
-        print(f"FP16                 : {cfg.fp16}")
+        print(f"FP16                 : {not cfg.disable_fp16}")
         print(f"Gradient checkpoint  : {not cfg.disable_grad_checkpointing}")
         print(f"torch.compile        : {cfg.compile}")
         print(f"MFU FLOPs/image      : {cfg.flops_per_image:.3e}")
@@ -357,31 +361,19 @@ def main():
     ).to(device)
 
     # Better Conv2d memory layout for T4.
-    model.patch_embed.weight.data = model.patch_embed.weight.data.contiguous(
-        memory_format=torch.channels_last
-    )
-
-    model.target_patch_embed.weight.data = model.target_patch_embed.weight.data.contiguous(
-        memory_format=torch.channels_last
-    )
+    model.patch_embed.weight.data = model.patch_embed.weight.data.contiguous(memory_format=torch.channels_last)
+    model.target_patch_embed.weight.data = model.target_patch_embed.weight.data.contiguous(memory_format=torch.channels_last)
 
     if cfg.compile:
-        if DYNAMO_AVAILABLE:
+        try:
+            import torch._dynamo
             torch._dynamo.config.suppress_errors = True
+        except Exception:
+            pass
 
-            # Compile only heavy trainable transformers, not the EMA target branch.
-            model.context_encoder = torch.compile(
-                model.context_encoder,
-                mode=cfg.compile_mode,
-            )
-
-            model.predictor = torch.compile(
-                model.predictor,
-                mode=cfg.compile_mode,
-            )
-
-        elif rank == 0:
-            print("torch._dynamo is not available. Running without torch.compile.")
+        # Compile only the heavy trainable transformers, not the EMA target branch.
+        model.context_encoder = torch.compile(model.context_encoder, mode=cfg.compile_mode)
+        model.predictor = torch.compile(model.predictor, mode=cfg.compile_mode)
 
     if ddp:
         model = DDP(
@@ -402,15 +394,14 @@ def main():
         print(f"Total parameters     : {total_params / 1e6:.2f}M")
         print(f"Trainable parameters : {trainable_params / 1e6:.2f}M", flush=True)
 
+    # Optimizer
     no_decay_keys = ("bias", "norm", "pos_embed", "mask_token")
-
     decay_params = []
     no_decay_params = []
 
     for n, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-
         if any(k in n for k in no_decay_keys):
             no_decay_params.append(p)
         else:
@@ -428,25 +419,23 @@ def main():
             betas=(0.9, 0.95),
             fused=True,
         )
-    except (TypeError, RuntimeError):
+    except TypeError:
         optimizer = torch.optim.AdamW(
             param_groups,
             lr=base_lr,
             betas=(0.9, 0.95),
         )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg.fp16)
+    scaler = torch.cuda.amp.GradScaler(enabled=not cfg.disable_fp16)
 
     dataset, sampler = build_dataset(cfg, rank, world_size, ddp)
     loader = build_loader(dataset, sampler, cfg)
 
     total_steps = len(loader) * cfg.epochs
-
     if cfg.benchmark_steps > 0:
         total_steps = cfg.benchmark_steps
 
     warmup_steps = len(loader) * cfg.warmup_epochs
-
     if cfg.benchmark_steps > 0:
         warmup_steps = min(warmup_steps, max(1, total_steps // 5))
 
@@ -455,14 +444,11 @@ def main():
     if cfg.resume and Path(cfg.resume).is_file():
         if rank == 0:
             print(f"Resuming from {cfg.resume}")
-
         ckpt = torch.load(cfg.resume, map_location=device)
-
         model_without_ddp.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scaler.load_state_dict(ckpt["scaler"])
-
-        start_epoch = ckpt.get("epoch", -1) + 1
+        start_epoch = ckpt["epoch"] + 1
 
     global_step = start_epoch * len(loader)
 
@@ -497,15 +483,8 @@ def main():
         if ddp:
             dist.barrier()
 
-    if cfg.tsne and not cfg.synthetic and cfg.benchmark_steps == 0:
-        if ddp:
-            dist.barrier()
-
-        if rank == 0:
-            run_tsne(model_without_ddp, cfg, device)
-
-    if ddp:
-        dist.barrier()
+    if cfg.tsne and rank == 0 and not cfg.synthetic and cfg.benchmark_steps == 0:
+        run_tsne(model_without_ddp, cfg, device)
 
     cleanup_dist()
 

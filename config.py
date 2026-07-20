@@ -18,7 +18,7 @@ def str2bool(v):
 @dataclass
 class Config:
     # Data
-    data_path: str = "./data"
+    data_path: str = "./dataset"
     output_dir: str = "./outputs"
 
     synthetic: bool = False
@@ -67,7 +67,7 @@ class Config:
     disable_grad_checkpointing: bool = False
     static_graph: bool = True
     aug: bool = True
-    fp16: bool = True
+    disable_fp16: bool = False
 
     # MFU accounting
     # Calibrated to your reported Phase-1 number:
