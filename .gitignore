@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing / linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_output/
+
+# Data
+data/
+*.tar
+*.tar.gz
+*.zip
+*.tgz
+
+# Outputs
+outputs/
+checkpoints/
+logs/
+wandb/
+lightning_logs/
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Torch / CUDA caches
+.torch/
+.cache/
+.nv/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
