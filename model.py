@@ -99,21 +99,6 @@ def _init_weights(m: nn.Module):
 
 
 class NanoJEPA(nn.Module):
-    """
-    Nano JEPA matching your reported configuration:
-
-    - Input: 64x64
-    - Patch: 8x8
-    - Patches: 64
-    - Embed dim: 384
-    - Context encoder: 6 layers
-    - Target encoder: 6 layers
-    - Predictor: 3 layers
-    - Heads: 12
-    - Mask ratio: 75%
-    - EMA target encoder
-    """
-
     def __init__(
         self,
         img_size: int = 64,
