@@ -7,8 +7,8 @@ import torchvision
 import torchvision.transforms as T
 
 
-CIFAR_MEAN = (0.4914, 0.4822, 0.4465)
-CIFAR_STD = (0.2470, 0.2435, 0.2616)
+NORMALIZE_MEAN = (0.4914, 0.4822, 0.4465)
+NORMALIZE_STD = (0.2470, 0.2435, 0.2616)
 
 
 class SyntheticDataset(Dataset):
@@ -29,8 +29,8 @@ class SyntheticDataset(Dataset):
 
 
 def build_transform(cfg):
-    mean = CIFAR_MEAN
-    std = CIFAR_STD
+    mean = NORMALIZE_MEAN
+    std = NORMALIZE_STD
 
     if cfg.aug:
         return T.Compose(

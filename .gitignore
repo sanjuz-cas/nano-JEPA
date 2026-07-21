@@ -29,10 +29,14 @@ htmlcov/
 
 # Data
 data/
+dataset/
 *.tar
 *.tar.gz
 *.zip
 *.tgz
+
+# Kaggle notebook (scratch file, not part of the project)
+new-nano-jepa.ipynb
 
 # Outputs
 outputs/
