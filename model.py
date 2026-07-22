@@ -34,6 +34,7 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
+        # FlashAttention / Memory-Efficient Attention is automatically applied here
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
@@ -169,7 +170,6 @@ class NanoJEPA(nn.Module):
             grad_ckpt=grad_ckpt,
         )
 
-        # Small head helps match the reported ~26.96M parameter count.
         self.predictor_head = nn.Linear(embed_dim, embed_dim)
 
         self.apply(_init_weights)
@@ -208,14 +208,51 @@ class NanoJEPA(nn.Module):
 
         self.target_pos_embed.lerp_(self.pos_embed, alpha)
 
-    def make_mask_ids(self, B: int, device: torch.device):
-        noise = torch.rand(B, self.num_patches, device=device)
-        ids = torch.argsort(noise, dim=1)
-
-        visible_ids = ids[:, : self.num_keep]
-        mask_ids = ids[:, self.num_keep :]
-
-        return visible_ids, mask_ids
+    def make_block_mask_ids(self, B: int, device: torch.device):
+        """
+        Spatial Block Masking (I-JEPA style).
+        Divides the image into 4 quadrants and masks 3 of them.
+        This forces the context encoder to learn global semantics rather than 
+        cheating via local pixel interpolation.
+        """
+        grid_size = int(round(math.sqrt(self.num_patches)))
+        half = grid_size // 2
+        
+        mask_grid = torch.zeros(B, grid_size, grid_size, dtype=torch.bool, device=device)
+        
+        for b in range(B):
+            # Randomly choose 3 out of 4 quadrants to mask (~75% mask ratio)
+            quads = torch.randperm(4, device=device)[:3]
+            for q in quads:
+                if q == 0: mask_grid[b, :half, :half] = True
+                elif q == 1: mask_grid[b, :half, half:] = True
+                elif q == 2: mask_grid[b, half:, :half] = True
+                else: mask_grid[b, half:, half:] = True
+                
+        mask_flat = mask_grid.flatten(1) # (B, num_patches)
+        
+        visible_ids_list = []
+        mask_ids_list = []
+        
+        for b in range(B):
+            current_mask = mask_flat[b]
+            num_masked = current_mask.sum().item()
+            target_masked = self.num_patches - self.num_keep
+            
+            # Adjust if exact 75% isn't met due to odd grid sizes
+            if num_masked < target_masked:
+                unmasked = torch.where(~current_mask)[0]
+                extra = target_masked - num_masked
+                current_mask[unmasked[torch.randperm(len(unmasked), device=device)[:extra]]] = True
+            elif num_masked > target_masked:
+                masked = torch.where(current_mask)[0]
+                extra = num_masked - target_masked
+                current_mask[masked[torch.randperm(len(masked), device=device)[:extra]]] = False
+                
+            visible_ids_list.append(torch.where(~current_mask)[0])
+            mask_ids_list.append(torch.where(current_mask)[0])
+            
+        return torch.stack(visible_ids_list), torch.stack(mask_ids_list)
 
     def forward(self, x):
         B = x.shape[0]
@@ -231,7 +268,8 @@ class NanoJEPA(nn.Module):
             target_tokens = target_tokens + self.target_pos_embed
             target = self.target_encoder(target_tokens)
 
-        visible_ids, mask_ids = self.make_mask_ids(B, device)
+        # Use Spatial Block Masking instead of random masking
+        visible_ids, mask_ids = self.make_block_mask_ids(B, device)
 
         visible_idx = visible_ids.unsqueeze(-1).expand(-1, -1, self.embed_dim)
         mask_idx = mask_ids.unsqueeze(-1).expand(-1, -1, self.embed_dim)
