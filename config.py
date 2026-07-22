@@ -68,10 +68,6 @@ class Config:
     static_graph: bool = True
     aug: bool = True
     disable_fp16: bool = False
-
-    # MFU accounting
-    # Calibrated to your reported Phase-1 number:
-    # 985 img/sec * 23.1 MFLOPs/img ~= 22.75 GFLOPS => 0.035% of 65 TFLOPS.
     flops_per_image: float = 23.1e6
     peak_tflops: float = 65.0
 
@@ -108,6 +104,9 @@ def parse_config() -> Config:
 
     # Compatibility with older launchers that pass --local-rank.
     parser.add_argument("--local-rank", "--local_rank", type=int, default=0)
+    parser.add_argument('--accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--peak-tflops', type=float, default=0.0, help='Peak TFLOPS of GPU (0.0 for auto-detect)')
+    parser.add_argument('--mlp-ratio', type=float, default=4.0, help='ViT MLP ratio for FLOPs calculation')
 
     args, _ = parser.parse_known_args()
 
