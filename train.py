@@ -186,7 +186,6 @@ def train_one_epoch(
     
     accumulation_steps = getattr(cfg, 'accumulation_steps', 1)
     optimizer.zero_grad(set_to_none=True)
-    is_ddp = isinstance(model, DDP)
 
     for step, (images, _) in enumerate(loader):
         if cfg.benchmark_steps > 0 and global_step >= cfg.benchmark_steps:
@@ -196,22 +195,16 @@ def train_one_epoch(
         momentum = cosine_schedule(global_step, total_steps, cfg.momentum, cfg.momentum_end)
         images = images.to(device, non_blocking=True, memory_format=torch.channels_last)
 
-        # Force sync on the last step of the epoch to prevent dangling gradients
+        # Updated autocast syntax
+        with torch.amp.autocast('cuda', enabled=not cfg.disable_fp16):
+            pred, target = model(images)
+            loss = jepa_loss(pred, target, std_weight=cfg.std_weight, cov_weight=cfg.cov_weight)
+            loss = loss / accumulation_steps
+
+        # Backward pass (DDP allreduces every step, which is stable with torch.compile)
+        scaler.scale(loss).backward()
+
         is_sync_step = (step + 1) % accumulation_steps == 0 or (step + 1) == len(loader)
-        
-        # Use no_sync() for intermediate accumulation steps to save DDP communication overhead
-        if is_ddp and not is_sync_step:
-            sync_context = model.no_sync()
-        else:
-            sync_context = contextlib.nullcontext()
-
-        with sync_context:
-            with torch.cuda.amp.autocast(enabled=not cfg.disable_fp16):
-                pred, target = model(images)
-                loss = jepa_loss(pred, target, std_weight=cfg.std_weight, cov_weight=cfg.cov_weight)
-                loss = loss / accumulation_steps
-
-            scaler.scale(loss).backward()
 
         if is_sync_step:
             if cfg.clip_grad > 0:
@@ -372,7 +365,7 @@ def main():
     except TypeError:
         optimizer = torch.optim.AdamW(param_groups, lr=base_lr, betas=(0.9, 0.95))
 
-    scaler = torch.cuda.amp.GradScaler(enabled=not cfg.disable_fp16)
+    scaler = torch.cuda.amp.GradScaler('cuda', enabled=not cfg.disable_fp16)
     dataset, sampler = build_dataset(cfg, rank, world_size, ddp)
     loader = build_loader(dataset, sampler, cfg)
 
