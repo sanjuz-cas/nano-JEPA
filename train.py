@@ -331,7 +331,7 @@ def main():
 
     if cfg.compile:
         try:
-            import torch._dynamo
+            import torch._dynamo as dynamo
             torch._dynamo.config.suppress_errors = True
         except Exception:
             pass
