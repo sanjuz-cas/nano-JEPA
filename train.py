@@ -196,7 +196,7 @@ def train_one_epoch(
         images = images.to(device, non_blocking=True, memory_format=torch.channels_last)
 
         # Updated autocast syntax
-        with torch.amp.autocast('cuda', enabled=not cfg.disable_fp16):
+        with torch.cuda.amp.autocast(enabled=not cfg.disable_fp16):
             pred, target = model(images)
             loss = jepa_loss(pred, target, std_weight=cfg.std_weight, cov_weight=cfg.cov_weight)
             loss = loss / accumulation_steps
@@ -365,7 +365,7 @@ def main():
     except TypeError:
         optimizer = torch.optim.AdamW(param_groups, lr=base_lr, betas=(0.9, 0.95))
 
-    scaler = torch.cuda.amp.GradScaler('cuda', enabled=not cfg.disable_fp16)
+    scaler = torch.cuda.amp.GradScaler(enabled=not cfg.disable_fp16)
     dataset, sampler = build_dataset(cfg, rank, world_size, ddp)
     loader = build_loader(dataset, sampler, cfg)
 
