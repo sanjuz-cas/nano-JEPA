@@ -38,6 +38,7 @@ class Config:
     # Training
     epochs: int = 20
     batch_size: int = 256  # per-GPU batch size
+    accumulation_steps: int = 1  # Gradient accumulation steps
     lr: float = 3e-4
     scale_lr: bool = False
     lr_scale_base_batch: int = 512
@@ -56,20 +57,23 @@ class Config:
     # Optimization
     clip_grad: float = 0.0
     workers: int = 4
-    prefetch: int = 4
+    prefetch: int = 2  
     log_interval: int = 20
     save_every: int = 5
     resume: str = ""
 
     # Performance
     compile: bool = False
-    compile_mode: str = "max-autotune-no-cudagraphs"
+    # "reduce-overhead" uses CUDA Graphs, massive MFU boost for static ViT shapes
+    compile_mode: str = "reduce-overhead" 
     disable_grad_checkpointing: bool = False
     static_graph: bool = True
     aug: bool = True
     disable_fp16: bool = False
-    flops_per_image: float = 23.1e6
-    peak_tflops: float = 65.0
+    
+    # 0.0 triggers dynamic calculation/auto-detection in train.py
+    flops_per_image: float = 0.0 
+    peak_tflops: float = 0.0     
 
     # Benchmark / eval
     benchmark_steps: int = 0
@@ -104,9 +108,6 @@ def parse_config() -> Config:
 
     # Compatibility with older launchers that pass --local-rank.
     parser.add_argument("--local-rank", "--local_rank", type=int, default=0)
-    parser.add_argument('--accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
-    parser.add_argument('--peak-tflops', type=float, default=0.0, help='Peak TFLOPS of GPU (0.0 for auto-detect)')
-    parser.add_argument('--mlp-ratio', type=float, default=4.0, help='ViT MLP ratio for FLOPs calculation')
 
     args, _ = parser.parse_known_args()
 
