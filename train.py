@@ -128,7 +128,8 @@ def run_tsne(model_without_ddp: NanoJEPA, cfg, device: torch.device):
     std = (0.229, 0.224, 0.225)
 
     transform = T.Compose([
-        T.Resize(cfg.img_size),
+        T.Resize(int(cfg.img_size * 1.125)),
+        T.CenterCrop(cfg.img_size),
         T.ToTensor(),
         T.Normalize(mean, std),
     ])
