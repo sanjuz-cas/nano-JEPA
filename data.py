@@ -133,6 +133,7 @@ def build_tsne_loader(cfg):
     transform = T.Compose(
         [
             T.Resize(cfg.img_size),
+            T.CenterCrop(cfg.img_size),
             T.ToTensor(),
             T.Normalize(NORMALIZE_MEAN, NORMALIZE_STD),
         ]
