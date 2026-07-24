@@ -31,23 +31,21 @@ def build_transform(cfg):
     std = NORMALIZE_STD
 
     if cfg.aug:
-        return T.Compose(
-            [
-                T.Resize(int(cfg.img_size * 1.125)),
-                T.RandomCrop(cfg.img_size),
-                T.RandomHorizontalFlip(),
-                T.ToTensor(),
-                T.Normalize(mean, std),
-            ]
-        )
-
-    return T.Compose(
-        [
-            T.Resize(cfg.img_size),
+        return T.Compose([
+            T.RandomResizedCrop(cfg.img_size, scale=(0.8, 1.0)),
+            T.RandomHorizontalFlip(),
+            T.RandomVerticalFlip(),         
+            T.RandomRotation(180),          
             T.ToTensor(),
             T.Normalize(mean, std),
-        ]
-    )
+        ])
+
+    return T.Compose([
+        T.Resize(int(cfg.img_size * 1.125)),
+        T.CenterCrop(cfg.img_size),
+        T.ToTensor(),
+        T.Normalize(mean, std),
+    ])
 
 
 def build_dataset(cfg, rank: int, world_size: int, ddp: bool):
