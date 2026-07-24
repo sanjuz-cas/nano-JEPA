@@ -208,51 +208,51 @@ class NanoJEPA(nn.Module):
 
         self.target_pos_embed.lerp_(self.pos_embed, alpha)
 
-    def make_block_mask_ids(self, B: int, device: torch.device):
-        """
-        Spatial Block Masking (I-JEPA style).
-        Divides the image into 4 quadrants and masks 3 of them.
-        This forces the context encoder to learn global semantics rather than 
-        cheating via local pixel interpolation.
-        """
-        grid_size = int(round(math.sqrt(self.num_patches)))
-        half = grid_size // 2
-        
-        mask_grid = torch.zeros(B, grid_size, grid_size, dtype=torch.bool, device=device)
-        
-        for b in range(B):
-            # Randomly choose 3 out of 4 quadrants to mask (~75% mask ratio)
-            quads = torch.randperm(4, device=device)[:3]
-            for q in quads:
-                if q == 0: mask_grid[b, :half, :half] = True
-                elif q == 1: mask_grid[b, :half, half:] = True
-                elif q == 2: mask_grid[b, half:, :half] = True
-                else: mask_grid[b, half:, half:] = True
-                
-        mask_flat = mask_grid.flatten(1) # (B, num_patches)
-        
-        visible_ids_list = []
-        mask_ids_list = []
-        
-        for b in range(B):
-            current_mask = mask_flat[b]
-            num_masked = current_mask.sum().item()
-            target_masked = self.num_patches - self.num_keep
-            
-            # Adjust if exact 75% isn't met due to odd grid sizes
-            if num_masked < target_masked:
-                unmasked = torch.where(~current_mask)[0]
-                extra = target_masked - num_masked
-                current_mask[unmasked[torch.randperm(len(unmasked), device=device)[:extra]]] = True
-            elif num_masked > target_masked:
-                masked = torch.where(current_mask)[0]
-                extra = num_masked - target_masked
-                current_mask[masked[torch.randperm(len(masked), device=device)[:extra]]] = False
-                
-            visible_ids_list.append(torch.where(~current_mask)[0])
-            mask_ids_list.append(torch.where(current_mask)[0])
-            
-        return torch.stack(visible_ids_list), torch.stack(mask_ids_list)
+    def make_mask_ids(self, B: int, device: torch.device):
+    """
+    Hybrid masking: Block masking for high-res (>=128), 
+    Random masking for low-res (<128) to preserve context.
+    """
+    grid_size = int(round(math.sqrt(self.num_patches)))
+    
+    if grid_size >= 16:  # High resolution: use spatial block masking
+        return self._block_mask(B, device, grid_size)
+    else:  # Low resolution: use random masking to preserve enough context
+        noise = torch.rand(B, self.num_patches, device=device)
+        ids = torch.argsort(noise, dim=1)
+        visible_ids = ids[:, :self.num_keep]
+        mask_ids = ids[:, self.num_keep:]
+        return visible_ids, mask_ids
+
+def _block_mask(self, B, device, grid_size):
+    """Spatial block masking for high-res images"""
+    half = grid_size // 2
+    mask_grid = torch.zeros(B, grid_size, grid_size, dtype=torch.bool, device=device)
+    for b in range(B):
+        quads = torch.randperm(4, device=device)[:3]
+        for q in quads:
+            if q == 0: mask_grid[b, :half, :half] = True
+            elif q == 1: mask_grid[b, :half, half:] = True
+            elif q == 2: mask_grid[b, half:, :half] = True
+            else: mask_grid[b, half:, half:] = True
+    
+    mask_flat = mask_grid.flatten(1)
+    target_masked = self.num_patches - self.num_keep
+    
+    visible_ids_list, mask_ids_list = [], []
+    for b in range(B):
+        current_mask = mask_flat[b]
+        num_masked = current_mask.sum().item()
+        if num_masked < target_masked:
+            unmasked = torch.where(~current_mask)[0]
+            current_mask[unmasked[torch.randperm(len(unmasked), device=device)[:target_masked - num_masked]]] = True
+        elif num_masked > target_masked:
+            masked = torch.where(current_mask)[0]
+            current_mask[masked[torch.randperm(len(masked), device=device)[:num_masked - target_masked]]] = False
+        visible_ids_list.append(torch.where(~current_mask)[0])
+        mask_ids_list.append(torch.where(current_mask)[0])
+    
+    return torch.stack(visible_ids_list), torch.stack(mask_ids_list)
 
     def forward(self, x):
         B = x.shape[0]
