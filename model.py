@@ -223,11 +223,12 @@ class NanoJEPA(nn.Module):
             visible_ids = ids[:, :self.num_keep]
             mask_ids = ids[:, self.num_keep:]
             return visible_ids, mask_ids
-        
+
     def _block_mask(self, B, device, grid_size):
         """Spatial block masking for high-res images"""
         half = grid_size // 2
         mask_grid = torch.zeros(B, grid_size, grid_size, dtype=torch.bool, device=device)
+        
         for b in range(B):
             quads = torch.randperm(4, device=device)[:3]
             for q in quads:
@@ -243,12 +244,16 @@ class NanoJEPA(nn.Module):
         for b in range(B):
             current_mask = mask_flat[b]
             num_masked = current_mask.sum().item()
+            
             if num_masked < target_masked:
                 unmasked = torch.where(~current_mask)[0]
-                current_mask[unmasked[torch.randperm(len(unmasked), device=device)[:target_masked - num_masked]]] = True
+                extra = target_masked - num_masked
+                current_mask[unmasked[torch.randperm(len(unmasked), device=device)[:extra]]] = True
             elif num_masked > target_masked:
                 masked = torch.where(current_mask)[0]
-                current_mask[masked[torch.randperm(len(masked), device=device)[:num_masked - target_masked]]] = False
+                extra = num_masked - target_masked
+                current_mask[masked[torch.randperm(len(masked), device=device)[:extra]]] = False
+                
             visible_ids_list.append(torch.where(~current_mask)[0])
             mask_ids_list.append(torch.where(current_mask)[0])
         
@@ -268,8 +273,8 @@ class NanoJEPA(nn.Module):
             target_tokens = target_tokens + self.target_pos_embed
             target = self.target_encoder(target_tokens)
 
-        # Use Spatial Block Masking instead of random masking
-        visible_ids, mask_ids = self.make_block_mask_ids(B, device)
+        # Use Hybrid Masking (Random for low-res, Block for high-res)
+        visible_ids, mask_ids = self.make_mask_ids(B, device)
 
         visible_idx = visible_ids.unsqueeze(-1).expand(-1, -1, self.embed_dim)
         mask_idx = mask_ids.unsqueeze(-1).expand(-1, -1, self.embed_dim)
