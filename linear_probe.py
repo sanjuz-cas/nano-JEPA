@@ -12,9 +12,6 @@ import torchvision.transforms as T
 
 from model import NanoJEPA
 
-# ---------------------------------------------------------------------
-# Model Wrappers
-# ---------------------------------------------------------------------
 class JEPABackbone(nn.Module):
     """Wraps the pre-trained JEPA context encoder for feature extraction."""
     def __init__(self, jepa_model):
@@ -39,18 +36,16 @@ class LinearProbe(nn.Module):
     def __init__(self, backbone, embed_dim, num_classes):
         super().__init__()
         self.backbone = backbone
+        self.bn = nn.BatchNorm1d(embed_dim, affine=False, eps=1e-6)
         self.head = nn.Linear(embed_dim, num_classes)
         
     def forward(self, x):
         # Backbone is frozen, so we don't need to track gradients for it
         with torch.no_grad():
             feats = self.backbone(x)
+        feats = self.bn(feats)
         return self.head(feats)
 
-
-# ---------------------------------------------------------------------
-# Data Loading
-# ---------------------------------------------------------------------
 def get_transforms(img_size):
     # ImageNet stats (same as train.py)
     mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
@@ -72,10 +67,6 @@ def get_transforms(img_size):
     
     return train_transform, val_transform
 
-
-# ---------------------------------------------------------------------
-# Training & Evaluation Loops
-# ---------------------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, criterion, device, epoch):
     model.head.train() # Only the linear head trains
     model.backbone.eval() # Backbone stays frozen in eval mode
@@ -127,10 +118,6 @@ def evaluate(model, loader, criterion, device):
     val_acc = 100. * correct / total
     return val_loss, val_acc
 
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="JEPA Linear Probing Evaluation")
     
@@ -165,14 +152,12 @@ def main():
     print("JEPA Linear Probing Evaluation")
     print("="*60)
     
-    # 1. Initialize empty JEPA model to hold weights
     jepa = NanoJEPA(
         img_size=args.img_size, patch_size=args.patch_size, embed_dim=args.embed_dim,
         context_depth=args.context_depth, target_depth=args.target_depth, 
         predictor_depth=args.predictor_depth, heads=args.heads, grad_ckpt=False
     ).to(device)
 
-    # 2. Load pre-trained weights
     print(f"Loading checkpoint from {args.checkpoint}...")
     ckpt = torch.load(args.checkpoint, map_location=device)
     state_dict = ckpt['model']
@@ -181,12 +166,10 @@ def main():
     cleaned_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     jepa.load_state_dict(cleaned_state_dict)
     
-    # 3. Extract backbone, freeze it, and attach linear head
     backbone = JEPABackbone(jepa).to(device)
     for param in backbone.parameters():
         param.requires_grad = False
         
-    # Discover number of classes from train folder
     train_dataset = torchvision.datasets.ImageFolder(args.train_path)
     num_classes = len(train_dataset.classes)
     print(f"Detected {num_classes} classes: {train_dataset.classes}")
@@ -194,7 +177,6 @@ def main():
     model = LinearProbe(backbone, args.embed_dim, num_classes).to(device)
     model = model.to(memory_format=torch.channels_last)
     
-    # 4. Setup DataLoaders
     train_transform, val_transform = get_transforms(args.img_size)
     
     train_dataset = torchvision.datasets.ImageFolder(args.train_path, transform=train_transform)
@@ -205,8 +187,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, 
                             num_workers=args.workers, pin_memory=True)
     
-    # 5. Setup Optimizer (Only optimizes the linear head)
-    optimizer = optim.AdamW(model.head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.SGD(model.head.parameters(), lr=0.1, momentum=0.9, weight_decay=0.0)
     criterion = nn.CrossEntropyLoss()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
@@ -215,7 +196,6 @@ def main():
     
     best_acc = 0.0
     
-    # 6. Training Loop
     for epoch in range(1, args.epochs + 1):
         train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch)
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
