@@ -209,20 +209,20 @@ class NanoJEPA(nn.Module):
         self.target_pos_embed.lerp_(self.pos_embed, alpha)
 
     def make_mask_ids(self, B: int, device: torch.device):
-    """
-    Hybrid masking: Block masking for high-res (>=128), 
-    Random masking for low-res (<128) to preserve context.
-    """
-    grid_size = int(round(math.sqrt(self.num_patches)))
-    
-    if grid_size >= 16:  # High resolution: use spatial block masking
-        return self._block_mask(B, device, grid_size)
-    else:  # Low resolution: use random masking to preserve enough context
-        noise = torch.rand(B, self.num_patches, device=device)
-        ids = torch.argsort(noise, dim=1)
-        visible_ids = ids[:, :self.num_keep]
-        mask_ids = ids[:, self.num_keep:]
-        return visible_ids, mask_ids
+        """
+        Hybrid masking: Block masking for high-res (>=128), 
+        Random masking for low-res (<128) to preserve context.
+        """
+        grid_size = int(round(math.sqrt(self.num_patches)))
+        
+        if grid_size >= 16:  # High resolution: use spatial block masking
+            return self._block_mask(B, device, grid_size)
+        else:  # Low resolution: use random masking to preserve enough context
+            noise = torch.rand(B, self.num_patches, device=device)
+            ids = torch.argsort(noise, dim=1)
+            visible_ids = ids[:, :self.num_keep]
+            mask_ids = ids[:, self.num_keep:]
+            return visible_ids, mask_ids
         
     def _block_mask(self, B, device, grid_size):
         """Spatial block masking for high-res images"""
